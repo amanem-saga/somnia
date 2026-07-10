@@ -1,0 +1,558 @@
+// ============================================================================
+// Somnia Database — Manufacturing Extension Patch (v1.2.0 → v1.3.0)
+// ============================================================================
+// This file contains ONLY the new models, enums, and relations required to
+// extend the existing schema into a complete manufacturing planning and
+// execution database. It does NOT regenerate the existing schema.
+//
+// TO APPLY:
+//   1. Copy the new enums into the enum block of schema.prisma.
+//   2. Append the new models below the existing models.
+//   3. Add the REQUIRED ADDITIONS TO EXISTING MODELS (section below).
+//   4. Run: npx prisma migrate dev --name manufacturing_extension
+//
+// REQUIRED ADDITIONS TO EXISTING MODELS
+// ─────────────────────────────────────────────
+// Add these fields to existing models. They are listed here because
+// Prisma-Patch.prisma cannot modify existing model definitions.
+//
+// ProductionBatch — add:
+//   routingVersionId  String?
+//   productionPlanId  String?
+//   parentBatchId     String?    // for rework batches
+//
+//   routingVersion    RoutingVersion?  @relation(fields: [routingVersionId], references: [id], onDelete: SetNull)
+//   productionPlan    ProductionPlan?  @relation(fields: [productionPlanId], references: [id], onDelete: SetNull)
+//   childBatches      ProductionBatch[]  // self-referential rework
+//
+//   @@index([routingVersionId])
+//   @@index([productionPlanId])
+//   @@index([parentBatchId])
+//
+// FinishedGoodsInventory — add:
+//   movements         InventoryMovement[]
+//
+// InventoryLot — add:
+//   movements         InventoryMovement[]
+//
+// ============================================================================
+
+// ============================================================================
+// NEW ENUMS
+// ============================================================================
+
+enum MachineStatus {
+  ACTIVE
+  UNDER_MAINTENANCE
+  DECOMMISSIONED
+  IDLE
+}
+
+enum MaintenanceType {
+  PREVENTIVE
+  CORRECTIVE
+  OVERHAUL
+}
+
+enum MovementType {
+  RECEIVE
+  CONSUME
+  TRANSFER
+  ADJUSTMENT
+  SCRAP
+  RETURN
+}
+
+enum PlanStatus {
+  DRAFT
+  APPROVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PlanPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum InspectionType {
+  INCOMING_MATERIAL
+  IN_PROCESS
+  FINAL
+  BATCH_APPROVAL
+}
+
+enum QcInspectionStatus {
+  PENDING
+  IN_PROGRESS
+  PASSED
+  FAILED
+  PENDING_REVIEW
+}
+
+enum DefectSeverity {
+  MINOR
+  MAJOR
+  CRITICAL
+}
+
+enum BatchApprovalDecision {
+  APPROVED
+  REJECTED
+  PENDING_REVIEW
+}
+
+enum MrpStatus {
+  PENDING
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+// ============================================================================
+// 4.1 BILL OF MATERIALS (BOM)
+// ============================================================================
+//
+// Defines what components are needed to produce a product. A BOM belongs to a
+// ProductSpecVersion and supports explicit versioning (v1, v2, v3...) — not
+// SCD time-series, because multiple BOM versions coexist for historical
+// reference. The BOM itself tracks which version is active.
+//
+// Calculated costs are NOT stored in the BOM. The application layer derives
+// total BOM cost by joining BOMItem → ManufacturingComponentCost at
+// calculation time, ensuring the result reflects current (or pinned) prices.
+// ============================================================================
+
+/// A BOM defines the recipe for producing a product at a given spec version.
+/// One ProductSpecVersion can have multiple BOMs (e.g. standard vs. premium),
+/// but typically has one active BOM at a time.
+model BOM {
+  id                    String   @id @default(cuid())
+  productSpecVersionId  String
+  name                  String           // e.g. "Standard BOM", "Premium BOM"
+  description           String?
+  activeVersionId       String?          // FK to the currently active BOMVersion
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  activeVersion       BOMVersion?         @relation("BOMActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions            BOMVersion[]
+
+  @@index([productSpecVersionId])
+  @@map("boms")
+}
+
+/// A versioned snapshot of a BOM. Versions are created explicitly (v1, v2,
+/// v3...) and multiple versions coexist. The parent BOM's activeVersionId
+/// points to whichever version is currently in use.
+model BOMVersion {
+  id          String   @id @default(cuid())
+  bomId       String
+  versionLabel String       // e.g. "v1.0", "v2.1"
+  effectiveDate DateTime?   // when this version takes effect
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  bom         BOM       @relation(fields: [bomId], references: [id], onDelete: Restrict)
+  bomAsActive BOM?      @relation("BOMActiveVersion")
+  items       BOMItem[]
+
+  @@unique([bomId, versionLabel])
+  @@index([bomId])
+  @@map("bom_versions")
+}
+
+/// A single line item within a BOM version. Defines how much of a component
+/// is needed, in what unit, and what waste to expect.
+/// When productSizeId is NULL, the item applies to all sizes.
+model BOMItem {
+  id                       String
+  bomVersionId             String
+  manufacturingComponentId String
+  productSizeId            String?          // null = applies to all sizes
+  quantityRequired         Decimal         @db.Decimal(10, 4)
+  quantityUnit             MeasurementUnit
+  wastePercent             Decimal         @db.Decimal(5, 2) @default(0)
+  sortOrder                Int             @default(0)
+  notes                    String?
+  createdAt                DateTime        @default(now())
+
+  bomVersion              BOMVersion               @relation(fields: [bomVersionId], references: [id], onDelete: Restrict)
+  manufacturingComponent   ManufacturingComponent   @relation(fields: [manufacturingComponentId], references: [id], onDelete: Restrict)
+  productSize              ProductSize?            @relation(fields: [productSizeId], references: [id], onDelete: SetNull)
+
+  @@index([bomVersionId])
+  @@index([manufacturingComponentId])
+  @@map("bom_items")
+}
+
+// ============================================================================
+// 4.2 MANUFACTURING ROUTING
+// ============================================================================
+//
+// Models the production process as an ordered sequence of steps.
+// A RoutingVersion is time-series (SCD) — the current routing for a product
+// spec is the one with validTo = NULL. When the process changes, close the
+// old row and insert a new one.
+// ============================================================================
+
+/// Time-series: the production process for a ProductSpecVersion.
+/// Defines which steps, in what order, with what resources.
+model RoutingVersion {
+  id                    String
+  productSpecVersionId  String
+  versionLabel          String
+  description           String?
+  validFrom             DateTime
+  validTo               DateTime?
+  createdAt             DateTime @default(now())
+
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  steps               RoutingStep[]
+  productionBatches   ProductionBatch[]
+
+  @@index([productSpecVersionId, validFrom, validTo])
+  @@map("routing_versions")
+}
+
+/// A single step in a production routing. Steps are executed in order
+/// (stepNumber). Each step may require a specific labor role and optionally
+/// a specific machine.
+model RoutingStep {
+  id                  String
+  routingVersionId    String
+  stepNumber          Int
+  stepName            String       // e.g. "Cutting", "Sewing", "QC Inspection"
+  description         String?
+  estimatedMinutes    Decimal      @db.Decimal(6, 2)
+  laborRoleCategoryId String?      // null = any qualified operator
+  machineId           String?      // null = manual step, no machine required
+  notes               String?
+  createdAt           DateTime     @default(now())
+
+  routingVersion    RoutingVersion      @relation(fields: [routingVersionId], references: [id], onDelete: Restrict)
+  laborRoleCategory LaborRoleCategory? @relation(fields: [laborRoleCategoryId], references: [id], onDelete: SetNull)
+  machine           Machine?            @relation(fields: [machineId], references: [id], onDelete: SetNull)
+
+  @@unique([routingVersionId, stepNumber])
+  @@index([routingVersionId])
+  @@index([machineId])
+  @@map("routing_steps")
+}
+
+// ============================================================================
+// 4.3 MACHINE MANAGEMENT
+// ============================================================================
+//
+// A registry of production machines. Static metadata with a time-series
+// operating cost (MachineOperatingCost) so cost history is preserved.
+// ============================================================================
+
+/// A production machine. Static metadata (name, model, manufacturer) that
+/// rarely changes. Cost and status are tracked separately.
+model Machine {
+  id                   String        @id @default(cuid())
+  name                 String
+  model                String?
+  manufacturer         String?
+  serialNumber         String?       @unique
+  purchaseDate         DateTime?
+  status               MachineStatus @default(IDLE)
+  expectedLifespanYears Int?
+  currentLocation      String?      // workshop, production line, etc.
+  notes                String?
+  createdAt            DateTime     @default(now())
+
+  maintenanceRecords MachineMaintenance[]
+  operatingCosts     MachineOperatingCost[]
+  routingSteps       RoutingStep[]
+
+  @@index([status])
+  @@map("machines")
+}
+
+/// Time-series: machine hourly operating cost changes over time
+/// (electricity, depreciation, maintenance amortization).
+model MachineOperatingCost {
+  id              String
+  machineId       String
+  hourlyCost      Decimal   @db.Decimal(10, 4)
+  currency        Currency
+  validFrom       DateTime
+  validTo         DateTime?
+  createdAt       DateTime  @default(now())
+
+  machine         Machine   @relation(fields: [machineId], references: [id], onDelete: Restrict)
+
+  @@index([machineId, validFrom, validTo])
+  @@map("machine_operating_costs")
+}
+
+/// Maintenance events for a machine. Each record is a historical event,
+/// not time-series — you INSERT a new row per maintenance event.
+model MachineMaintenance {
+  id               String          @id @default(cuid())
+  machineId        String
+  maintenanceType  MaintenanceType
+  description      String
+  scheduledDate    DateTime?
+  completedDate    DateTime?
+  cost             Decimal?        @db.Decimal(10, 2)
+  currency         Currency?
+  performedBy      String?         // person or vendor
+  notes            String?
+  createdAt        DateTime        @default(now())
+
+  machine          Machine         @relation(fields: [machineId], references: [id], onDelete: Restrict)
+
+  @@index([machineId])
+  @@index([scheduledDate])
+  @@map("machine_maintenance_records")
+}
+
+// ============================================================================
+// 4.4 QUALITY CONTROL
+// ============================================================================
+//
+// A complete QC module supporting inspections (incoming, in-process, final,
+// batch approval), defect tracking, corrective actions, and batch approval
+// decisions. All QC records reference ProductionBatch for traceability.
+// ============================================================================
+
+/// A quality control inspection event. References a ProductionBatch.
+/// Can be incoming material inspection, in-process checks, final inspection,
+/// or a formal batch approval review.
+model QcInspection {
+  id                String              @id @default(cuid())
+  productionBatchId String
+  inspectionType    InspectionType
+  inspectorName     String?             // person performing the inspection
+  status            QcInspectionStatus  @default(PENDING)
+  startedAt         DateTime?
+  completedAt       DateTime?
+  notes             String?
+  createdAt         DateTime            @default(now())
+
+  productionBatch   ProductionBatch      @relation(fields: [productionBatchId], references: [id], onDelete: Restrict)
+  items             QcInspectionItem[]
+  defects           Defect[]
+  correctiveActions  CorrectiveAction[]
+  batchApproval     BatchApproval?
+
+  @@index([productionBatchId])
+  @@index([status])
+  @@map("qc_inspections")
+}
+
+/// Individual check points within an inspection. Each item has a pass/fail
+/// result with an optional measurement value.
+model QcInspectionItem {
+  id              String   @id @default(cuid())
+  qcInspectionId  String
+  checkPoint      String           // e.g. "Seam strength", "Dimensions", "Waterproof test"
+  standard        String?          // e.g. ">= 50N", "90 ± 2 cm"
+  measurementValue Decimal?         @db.Decimal(10, 4)
+  measurementUnit  String?          // free-text unit for flexibility
+  passed          Boolean
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  qcInspection    QcInspection @relation(fields: [qcInspectionId], references: [id], onDelete: Restrict)
+
+  @@index([qcInspectionId])
+  @@map("qc_inspection_items")
+}
+
+/// A defect found during an inspection. References both the inspection
+/// and optionally a DefectCategory (lookup table for classification).
+model Defect {
+  id                String           @id @default(cuid())
+  qcInspectionId    String
+  defectCategoryId  String?          // FK to DefectCategory lookup
+  description       String
+  severity          DefectSeverity
+  location          String?          // where on the product the defect was found
+  quantity          Int              @default(1)  // number of defective units
+  notes             String?
+  createdAt         DateTime         @default(now())
+
+  qcInspection      QcInspection @relation(fields: [qcInspectionId], references: [id], onDelete: Restrict)
+  defectCategory    DefectCategory? @relation(fields: [defectCategoryId], references: [id], onDelete: SetNull)
+
+  @@index([qcInspectionId])
+  @@index([defectCategoryId])
+  @@map("defects")
+}
+
+/// Lookup table for defect categories. New categories can be added
+/// without schema migration — just INSERT.
+/// Examples: "Seam Defect", "Material Flaw", "Dimensional Error",
+/// "Surface Contamination", "Missing Component".
+model DefectCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  defects   Defect[]
+
+  @@map("defect_categories")
+}
+
+/// A corrective action taken to address one or more defects.
+/// Linked to the inspection and optionally to a specific defect.
+model CorrectiveAction {
+  id                String   @id @default(cuid())
+  qcInspectionId    String
+  defectId          String?          // null if action addresses multiple defects
+  description       String
+  assignedTo        String?
+  status            String          // e.g. "OPEN", "IN_PROGRESS", "COMPLETED"
+  dueDate           DateTime?
+  completedDate     DateTime?
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  qcInspection      QcInspection @relation(fields: [qcInspectionId], references: [id], onDelete: Restrict)
+  defect            Defect?      @relation(fields: [defectId], references: [id], onDelete: SetNull)
+
+  @@index([qcInspectionId])
+  @@index([status])
+  @@map("corrective_actions")
+}
+
+/// A formal batch approval decision. Created after final QC inspection
+/// to approve or reject the batch for release to finished goods inventory.
+model BatchApproval {
+  id                String              @id @default(cuid())
+  productionBatchId String              @unique  // one approval per batch
+  qcInspectionId    String?             // the final inspection that led to this approval
+  decision          BatchApprovalDecision
+  approvedById      String?             // FK to User
+  notes             String?
+  createdAt         DateTime            @default(now())
+
+  productionBatch   ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Restrict)
+  approvedBy        User?           @relation(fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@map("batch_approvals")
+}
+
+// ============================================================================
+// 4.5 INVENTORY MOVEMENTS
+// ============================================================================
+//
+// Every inventory change creates an InventoryMovement record. Inventory
+// quantities are always explainable through movement history. Movements
+// reference either InventoryLot (raw materials) or FinishedGoodsInventory
+// (finished goods) via separate nullable FKs.
+// ============================================================================
+
+/// A record of every inventory quantity change. Each movement explains
+/// WHY a quantity changed. Together, the full movement history for any
+/// inventory item must sum to its current quantity.
+model InventoryMovement {
+  id                      String        @id @default(cuid())
+  movementType            MovementType
+  inventoryLotId          String?       // set for raw-material movements
+  finishedGoodsInventoryId String?       // set for finished-goods movements
+  quantity                Decimal       @db.Decimal(14, 4)
+  unitCost                Decimal?      @db.Decimal(14, 4)  // unit cost at time of movement (for valuation)
+  currency                Currency?
+  fromWarehouseLocation   String?       // for TRANSFER movements
+  toWarehouseLocation     String?       // for TRANSFER and RECEIVE movements
+  referenceType           String?       // e.g. "PurchaseOrder", "ProductionBatch", "Adjustment"
+  referenceId             String?       // FK to the referenced record (PO id, batch id, etc.)
+  performedBy             String?       // person who made the movement
+  notes                   String?
+  createdAt               DateTime      @default(now())
+
+  inventoryLot          InventoryLot?          @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict)
+  finishedGoodsInventory FinishedGoodsInventory? @relation(fields: [finishedGoodsInventoryId], references: [id], onDelete: Restrict)
+
+  @@index([inventoryLotId, createdAt])
+  @@index([finishedGoodsInventoryId, createdAt])
+  @@index([movementType, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("inventory_movements")
+}
+
+// ============================================================================
+// 4.6 PRODUCTION PLANNING
+// ============================================================================
+//
+// Separates planning from execution. A ProductionPlan schedules future work
+// and groups multiple ProductionBatches. Plans go through a lifecycle
+// (DRAFT → APPROVED → IN_PROGRESS → COMPLETED).
+// ============================================================================
+
+/// A production plan groups multiple production batches into a coordinated
+/// schedule. Plans are created before execution begins.
+model ProductionPlan {
+  id               String        @id @default(cuid())
+  name             String
+  description      String?
+  plannedStartDate DateTime?
+  plannedEndDate   DateTime?
+  priority         PlanPriority  @default(MEDIUM)
+  status           PlanStatus    @default(DRAFT)
+  createdById      String
+  notes            String?
+  createdAt        DateTime      @default(now())
+
+  createdBy        User              @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  batches          ProductionBatch[]
+  materialReqs     MaterialRequirement[]
+
+  @@index([status])
+  @@index([plannedStartDate])
+  @@index([createdById])
+  @@map("production_plans")
+}
+
+// ============================================================================
+// 4.7 MATERIAL REQUIREMENT PLANNING (MRP)
+// ============================================================================
+//
+// A lightweight planning module. Each row represents a raw material
+// requirement for a production plan. The application layer populates
+// requiredQuantity (from BOM × planned production), compares against
+// available inventory, and flags shortages. This is a planning table,
+// NOT a transactional table — it does not trigger purchases.
+// ============================================================================
+
+/// A material requirement line for a production plan. Records what raw
+/// material is needed, what's available, and whether a purchase is
+/// recommended. The application layer calculates values; this table
+/// stores the snapshot.
+model MaterialRequirement {
+  id                       String     @id @default(cuid())
+  productionPlanId         String
+  productSpecVersionId     String
+  manufacturingComponentId String?
+  description              String
+  requiredQuantity         Decimal    @db.Decimal(14, 4)
+  availableQuantity        Decimal    @db.Decimal(14, 4) @default(0)
+  shortageQuantity         Decimal    @db.Decimal(14, 4) @default(0)
+  unit                     MeasurementUnit
+  purchaseRecommendation   Boolean    @default(false)
+  recommendedSupplierId    String?
+  recommendedQuantity      Decimal?   @db.Decimal(14, 4)
+  status                   MrpStatus  @default(PENDING)
+  notes                    String?
+  createdAt                DateTime   @default(now())
+
+  productionPlan         ProductionPlan         @relation(fields: [productionPlanId], references: [id], onDelete: Restrict)
+  productSpecVersion      ProductSpecVersion     @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  manufacturingComponent  ManufacturingComponent? @relation(fields: [manufacturingComponentId], references: [id], onDelete: SetNull)
+  recommendedSupplier     Supplier?              @relation(fields: [recommendedSupplierId], references: [id], onDelete: SetNull)
+
+  @@index([productionPlanId])
+  @@index([status])
+  @@index([purchaseRecommendation])
+  @@map("material_requirements")
+}
