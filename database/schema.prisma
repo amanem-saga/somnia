@@ -1,0 +1,947 @@
+// ============================================================================
+// Somnia Business Management Database — Prisma Schema (PostgreSQL)
+// ============================================================================
+// Version: 1.2.0 | Date: 2026-07-11
+// Author: Reda — Somnia Project
+// ============================================================================
+//
+// DESIGN PRINCIPLES
+// ────────────────
+// 1. Full time-series history — nothing is ever overwritten.
+//    Every input that can change over time uses the SCD Type-2 pattern:
+//      • validFrom DateTime (required)
+//      • validTo   DateTime? (nullable)
+//    The "current" row = validTo IS NULL.
+//    To change a value: close old row (validTo = now()), insert new row
+//    (validFrom = now()). Never UPDATE in place.
+//    Partial unique indexes (see partial_unique_indexes.sql) enforce
+//    "one current row per logical entity" at the DB level.
+//
+// 2. Generic multi-product from day one — no hardcoded product type.
+//    This schema supports any "import raw material → manufacture locally → sell"
+//    business model across multiple product lines, source countries, and
+//    labor profiles. ProductSpecVersion holds product-specific technical specs.
+//    No field name assumes a specific raw material (fabric, plastic, metal).
+//
+// 3. Snapshots for calculations, not live joins.
+//    CostCalculation rows pin exact time-series row IDs used, so any
+//    historical calculation is reproducible regardless of current values.
+//
+// 4. Currency handling — store original currency, convert on read/report.
+//    Never silently convert on write.
+//
+// 5. Money type — Decimal(14,4) for unit prices, Decimal(14,2) for totals.
+//    Never Float.
+//
+// 6. Deletion policy — onDelete: Restrict on all FKs touching
+//    financial/historical data. Never cascade-delete history.
+//
+// 7. Lookup tables over fixed enums — ComponentType and LaborRole are
+//    lookup tables (ManufacturingComponentCategory, LaborRoleCategory)
+//    so new categories can be added without schema migrations.
+//
+// 8. Single-column primary keys — every model uses id @id @default(cuid()).
+//    No composite PKs. cuid() is globally unique; composite keys only
+//    bloated FK references without adding integrity value.
+//
+// 9. Generic raw-material packaging — ContainerCapacity uses PackagingUnit
+//    (ROLL, CARTON, PALLET, DRUM, UNIT) instead of assuming rolls.
+//
+// 10. Two measurement axes — PackagingUnit describes how raw material is
+//     packaged for shipping (roll, carton, pallet). MeasurementUnit
+//     describes how raw material is measured for consumption/costing
+//     (M2, KG, PIECE, METER, LITER). Both are needed; they are not
+//     interchangeable.
+//
+// CALCULATION FORMULAS
+// ────────────────────
+// See CALCULATION_FORMULAS.md for the full application-layer formula
+// specification using generic field names.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+// Only truly universal, cross-domain vocabularies are enums.
+// Domain-specific categories (component types, labor roles) are lookup tables.
+
+enum UserRole {
+  OWNER
+  COLLABORATOR
+}
+
+enum Currency {
+  USD
+  MAD
+  CNY
+  AUD
+}
+
+enum ProductCategory {
+  ENCASEMENT
+  SLIP_ON_PROTECTOR
+  PILLOW
+  QUILT
+}
+
+enum CapabilityLevel {
+  YES
+  MAYBE
+  NO
+}
+
+enum QuoteSourceType {
+  DESK_RESEARCH
+  DIRECT_QUOTE
+  NEGOTIATED
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ShippingMethod {
+  FCL_20FT
+  FCL_40FT
+  LCL
+  AIR
+  COURIER
+}
+
+enum CostUnit {
+  PER_CONTAINER
+  PER_CBM
+  PER_KG
+  FLAT
+}
+
+enum PortFeeType {
+  HANDLING
+  CLEARANCE
+  INSPECTION
+  STORAGE
+  INLAND_TRANSPORT
+  DOCUMENTATION
+}
+
+enum LegalForm {
+  SARL
+  AUTO_ENTREPRENEUR
+  OTHER
+}
+
+enum SourcingOrigin {
+  LOCAL
+  IMPORTED
+}
+
+/// How raw material is packaged for shipping.
+/// Distinct from MeasurementUnit — this is about logistics, not costing.
+enum PackagingUnit {
+  ROLL
+  CARTON
+  PALLET
+  DRUM
+  UNIT
+}
+
+/// How raw material is measured for consumption/costing.
+/// Distinct from PackagingUnit — this is about production math, not logistics.
+enum MeasurementUnit {
+  M2
+  KG
+  PIECE
+  METER
+  LITER
+}
+
+enum POStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  READY_TO_SHIP
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum ShipmentStatus {
+  BOOKED
+  IN_TRANSIT
+  ARRIVED_PORT
+  CUSTOMS_CLEARANCE
+  CLEARED
+  DELIVERED_WAREHOUSE
+}
+
+enum ProductionBatchStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETE
+  QC_HOLD
+}
+
+// ============================================================================
+// 3.1 IDENTITY
+// ============================================================================
+
+/// Minimal identity model. Access control (auth/JWT/sessions) is an
+/// application-layer concern, not a schema concern.
+model User {
+  id        String   @id @default(cuid())
+  name      String?
+  email     String   @unique
+  role      UserRole @default(COLLABORATOR)
+  createdAt DateTime @default(now())
+
+  scenarios      Scenario[]
+  purchaseOrders PurchaseOrder[]
+
+  @@map("users")
+}
+
+// ============================================================================
+// 3.2 PRODUCT CATALOG
+// ============================================================================
+
+/// Any Somnia product line. Category enum covers the current range; add
+/// new values via schema migration when the business expands beyond
+/// encasements, pillows, quilts, and slip-on protectors.
+model Product {
+  id        String          @id @default(cuid())
+  name      String
+  category  ProductCategory
+  isActive  Boolean         @default(true)
+  createdAt DateTime        @default(now())
+
+  specVersions  ProductSpecVersion[]
+  sizes         ProductSize[]
+  scenarios     Scenario[]
+  batches       ProductionBatch[]
+  finishedGoods FinishedGoodsInventory[]
+
+  @@map("products")
+}
+
+/// Time-series: product technical specifications change over time.
+/// Every spec change = new row with validFrom; old row gets validTo = now().
+/// Holds ALL product-specific physical specs (composition, thickness,
+/// pore size, etc.) so the schema is generic across product lines.
+model ProductSpecVersion {
+  id                     String
+  productId              String
+  versionLabel           String
+  faceFabricComposition  String
+  faceFabricGsm          Int
+  tpuThicknessMm         Decimal?         @db.Decimal(6, 3)
+  tpuGsm                 Int?
+  totalGsm               Int
+  poreSizeMicrons        Decimal?         @db.Decimal(6, 2)
+  waterproofRatingMmH2O  Int?
+  mvtrMin                Int?
+  mvtrMax                Int?
+  certificationsRequired String[]
+  sourceNote             String?
+  validFrom              DateTime
+  validTo                DateTime?
+  createdAt              DateTime         @default(now())
+
+  product             Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  supplierCapabilities SupplierCapability[]
+  supplierQuotes      SupplierQuote[]
+  supplierScores      SupplierScore[]
+  containerCapacities ContainerCapacity[]
+  scenarios           Scenario[]
+  purchaseOrders      PurchaseOrder[]
+  inventoryLots       InventoryLot[]
+
+  @@index([productId, validFrom, validTo])
+  @@map("product_spec_versions")
+}
+
+/// Time-series: product size/dimension variants. Waste % can change when
+/// cutting patterns improve or raw-material dimensions change.
+/// rawMaterialQuantityPerUnit + rawMaterialUnit together define how much
+/// raw material each finished unit consumes (e.g. 4.80 M2 for a single
+/// mattress encasement, or 0.35 KG for a pillow protector).
+model ProductSize {
+  id                        String
+  productId                 String
+  sizeLabel                 String           // e.g. "Single", "Double", "Queen", "King"
+  widthCm                   Int
+  lengthCm                  Int
+  heightCm                  Int
+  rawMaterialQuantityPerUnit Decimal          @db.Decimal(8, 4)  // e.g. 4.8000
+  rawMaterialUnit           MeasurementUnit
+  wastePercent              Decimal          @db.Decimal(5, 2)   // e.g. 12.00 = 12%
+  validFrom                 DateTime
+  validTo                   DateTime?
+  createdAt                 DateTime         @default(now())
+
+  product        Product                    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  laborTimes     ManufacturingLaborTime[]
+  componentCosts ManufacturingComponentCost[]
+  mfgCostCalcs   ManufacturingCostCalculation[]
+  profitCalcs    ProfitabilityCalculation[]
+
+  @@index([productId, validFrom, validTo])
+  @@map("product_sizes")
+}
+
+// ============================================================================
+// 3.3 SUPPLY CHAIN
+// ============================================================================
+
+/// Raw-material suppliers. Static metadata — does not change over time.
+/// Changing attributes (capabilities, quotes, scores) are in separate
+/// time-series tables. Works for any sourcing country, not just China.
+model Supplier {
+  id                  String    @id @default(cuid())
+  companyName         String
+  website             String?
+  alibabaUrl          String?
+  oneSixEightEightUrl String?
+  contactPerson       String?
+  email               String?
+  whatsapp            String?
+  wechat              String?
+  region              String?          // geographic region (province, state, etc.)
+  country             String    @default("China")
+  certifications      String[]
+  oemCapable          Boolean   @default(false)
+  odmCapable          Boolean   @default(false)
+  notes               String?
+  createdAt           DateTime  @default(now())
+
+  capabilities   SupplierCapability[]
+  quotes         SupplierQuote[]
+  scores         SupplierScore[]
+  purchaseOrders PurchaseOrder[]
+  components     ManufacturingComponent[]
+
+  @@map("suppliers")
+}
+
+/// Time-series: which product specs a supplier can produce.
+/// A supplier may be YES for one spec version but NO for another.
+model SupplierCapability {
+  id                    String
+  supplierId            String
+  productSpecVersionId  String
+  productId             String   // denormalized for query convenience
+  canProduce            CapabilityLevel
+  moqMeters             Int?
+  leadTimeDaysMin       Int?
+  leadTimeDaysMax       Int?
+  notes                 String?
+  validFrom             DateTime
+  validTo               DateTime?
+  createdAt             DateTime  @default(now())
+
+  supplier           Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+
+  @@index([supplierId, validFrom, validTo])
+  @@index([productSpecVersionId])
+  @@map("supplier_capabilities")
+}
+
+/// Time-series: the most frequently updated table. Every new quote or price
+/// change = new row. Old row closed with validTo = now().
+/// packagingUnit indicates the physical form this quote covers (ROLL, CARTON,
+/// etc.). pricePerM2 and pricePerKg use MeasurementUnit semantics; the other
+/// price/size fields describe one packaged unit.
+model SupplierQuote {
+  id                    String
+  supplierId            String
+  productSpecVersionId  String
+  productId             String   // denormalized for query convenience
+  pricePerM2            Decimal?  @db.Decimal(10, 4)
+  pricePerPackagingUnit Decimal?  @db.Decimal(10, 4)
+  pricePerKg            Decimal?  @db.Decimal(10, 4)
+  currency              Currency
+  packagingUnit         PackagingUnit
+  unitWidthCm           Int?
+  unitLengthM           Decimal?  @db.Decimal(6, 2)
+  unitWeightKg          Decimal?  @db.Decimal(8, 2)
+  sourceType            QuoteSourceType
+  confidenceLevel       ConfidenceLevel @default(LOW)
+  notes                 String?
+  validFrom             DateTime
+  validTo               DateTime?
+  createdAt             DateTime  @default(now())
+
+  supplier           Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  scenarios          Scenario[]
+
+  @@index([supplierId, validFrom, validTo])
+  @@index([productSpecVersionId])
+  @@index([currency])
+  @@map("supplier_quotes")
+}
+
+/// Time-series: composite scoring for supplier ranking.
+model SupplierScore {
+  id                     String
+  supplierId             String
+  productSpecVersionId   String
+  productId              String   // denormalized for query convenience
+  productQualityScore    Decimal   @db.Decimal(5, 2)
+  costEfficiencyScore    Decimal   @db.Decimal(5, 2)
+  oemCapabilityScore     Decimal   @db.Decimal(5, 2)
+  reliabilityScore       Decimal   @db.Decimal(5, 2)
+  exportExperienceScore  Decimal   @db.Decimal(5, 2)
+  certificationsScore    Decimal   @db.Decimal(5, 2)
+  moqFlexibilityScore    Decimal   @db.Decimal(5, 2)
+  communicationScore     Decimal   @db.Decimal(5, 2)
+  weightedScore          Decimal   @db.Decimal(5, 2)
+  notes                  String?
+  computedAt             DateTime
+  validFrom              DateTime
+  validTo                DateTime?
+  createdAt              DateTime  @default(now())
+
+  supplier           Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+
+  @@index([supplierId, validFrom, validTo])
+  @@index([productSpecVersionId])
+  @@map("supplier_scores")
+}
+
+// ============================================================================
+// 3.4 LOGISTICS
+// ============================================================================
+
+/// Freight forwarders / carriers. Static metadata.
+model Transitaire {
+  id              String    @id @default(cuid())
+  companyName     String
+  contactPerson   String?
+  email           String?
+  phone           String?
+  servicesOffered String[]
+  notes           String?
+  createdAt       DateTime  @default(now())
+
+  shippingRoutes  ShippingRoute[]
+  shipments       Shipment[]
+
+  @@map("transitaires")
+}
+
+/// Time-series: shipping rates change frequently. Every rate change = new row.
+/// minChargeAmount captures the minimum-charge floor (e.g. LCL $500).
+model ShippingRoute {
+  id              String
+  originPort      String
+  destinationPort String
+  method          ShippingMethod
+  transitaireId   String?
+  costAmount      Decimal   @db.Decimal(10, 2)
+  costUnit        CostUnit
+  currency        Currency
+  minChargeAmount Decimal?  @db.Decimal(10, 2)
+  transitDaysMin  Int?
+  transitDaysMax  Int?
+  sourceUrl       String?
+  notes           String?
+  validFrom       DateTime
+  validTo         DateTime?
+  createdAt       DateTime  @default(now())
+
+  transitaire     Transitaire? @relation(fields: [transitaireId], references: [id], onDelete: SetNull)
+  scenarios       Scenario[]
+  shipments       Shipment[]
+
+  @@index([originPort, destinationPort, method, validFrom, validTo])
+  @@map("shipping_routes")
+}
+
+/// Time-series: how many raw-material units fit in a container.
+/// Generic across packaging types via PackagingUnit enum.
+/// Capacity depends on the ProductSpecVersion since raw-material
+/// dimensions/weight change with spec.
+model ContainerCapacity {
+  id                    String
+  productSpecVersionId  String
+  containerType         ShippingMethod
+  packagingUnit         PackagingUnit
+  unitsPerContainer     Int            // e.g. 180 rolls per 20ft container
+  cbmPerUnit            Decimal         @db.Decimal(8, 4)
+  estimatedUnitWeightKg Decimal         @db.Decimal(8, 2)
+  validFrom             DateTime
+  validTo               DateTime?
+  createdAt             DateTime         @default(now())
+
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+
+  @@index([productSpecVersionId, validFrom, validTo])
+  @@map("container_capacities")
+}
+
+// ============================================================================
+// 3.5 CUSTOMS & REGULATORY
+// ============================================================================
+
+/// Time-series: customs duty rates, VAT, TPI, TIC can all change.
+model CustomsRegime {
+  id                String
+  country           String    @default("Morocco")
+  hsCode            String
+  description       String?
+  importDutyPercent Decimal   @db.Decimal(5, 2)
+  vatPercent        Decimal   @db.Decimal(5, 2)
+  tpiPercent        Decimal   @db.Decimal(5, 4)
+  ticPercent        Decimal?  @db.Decimal(5, 2)
+  sourceUrl         String?
+  notes             String?
+  validFrom         DateTime
+  validTo           DateTime?
+  createdAt         DateTime  @default(now())
+
+  scenarios         Scenario[]
+
+  @@index([country, hsCode, validFrom, validTo])
+  @@map("customs_regimes")
+}
+
+/// Time-series: port fees change over time and vary by port.
+model PortFee {
+  id          String
+  port        String
+  feeType     PortFeeType
+  amountMin   Decimal   @db.Decimal(10, 2)
+  amountMax   Decimal   @db.Decimal(10, 2)
+  currency    Currency
+  validFrom   DateTime
+  validTo     DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([port, feeType, validFrom, validTo])
+  @@map("port_fees")
+}
+
+/// Time-series: business entity legal form, VAT registration status, etc.
+/// Whether VAT is a recoverable input-tax credit or a sunk cost depends
+/// on vatRegistered at the time the calculation was made.
+model BusinessEntityStatus {
+  id                    String
+  name                  String
+  legalForm             LegalForm
+  vatRegistered         Boolean
+  vatRegistrationNumber String?
+  validFrom             DateTime
+  validTo               DateTime?
+  createdAt             DateTime  @default(now())
+
+  scenarios             Scenario[]
+
+  @@index([name, validFrom, validTo])
+  @@map("business_entity_statuses")
+}
+
+// ============================================================================
+// 3.6 LABOR & MANUFACTURING
+// ============================================================================
+
+/// Lookup table for labor roles. New roles can be added without a schema
+/// migration — just INSERT a new row.
+model LaborRoleCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  laborRates  LaborRate[]
+
+  @@map("labor_role_categories")
+}
+
+/// Time-series: labor rates change (yearly minimum-wage adjustments, raises).
+model LaborRate {
+  id              String
+  roleId          String
+  monthlyWageMad  Decimal   @db.Decimal(10, 2)
+  hourlyRateMad   Decimal   @db.Decimal(8, 2)
+  sourceUrl       String?
+  validFrom       DateTime
+  validTo         DateTime?
+  createdAt       DateTime  @default(now())
+
+  role            LaborRoleCategory @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@index([roleId, validFrom, validTo])
+  @@map("labor_rates")
+}
+
+/// Time-series: how long it takes to produce one unit. Changes with
+/// experience, new equipment, or process improvements.
+model ManufacturingLaborTime {
+  id             String
+  productSizeId  String
+  minutesPerUnit Decimal   @db.Decimal(6, 2)
+  validFrom      DateTime
+  validTo        DateTime?
+  createdAt      DateTime  @default(now())
+
+  productSize    ProductSize @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+
+  @@index([productSizeId, validFrom, validTo])
+  @@map("manufacturing_labor_times")
+}
+
+/// Lookup table for manufacturing component categories.
+/// New categories can be added without schema migration — just INSERT.
+model ManufacturingComponentCategory {
+  id              String          @id @default(cuid())
+  name            String          @unique
+  productCategory ProductCategory?  // optional: scope to a product line
+  createdAt       DateTime        @default(now())
+
+  components     ManufacturingComponent[]
+
+  @@map("manufacturing_component_categories")
+}
+
+/// Catalog of manufacturing components. Static metadata — the physical
+/// component description. Price lives in ManufacturingComponentCost.
+model ManufacturingComponent {
+  id              String         @id @default(cuid())
+  categoryId      String
+  description     String
+  sourcingOrigin  SourcingOrigin
+  supplierId      String?        // set if imported; null if sourced locally
+  createdAt       DateTime       @default(now())
+
+  category        ManufacturingComponentCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  supplier        Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  costs           ManufacturingComponentCost[]
+
+  @@map("manufacturing_components")
+}
+
+/// Time-series: component prices change. Some components scale by
+/// product size (zippers), others don't (thread spools, labels).
+/// When productSizeId IS NULL, the cost applies to all sizes.
+model ManufacturingComponentCost {
+  id                       String
+  manufacturingComponentId String
+  productSizeId            String?   // nullable — some components don't scale by size
+  unitCost                 Decimal   @db.Decimal(10, 4)
+  currency                 Currency
+  notes                    String?
+  validFrom                DateTime
+  validTo                  DateTime?
+  createdAt                DateTime  @default(now())
+
+  manufacturingComponent   ManufacturingComponent @relation(fields: [manufacturingComponentId], references: [id], onDelete: Restrict)
+  productSize              ProductSize?          @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+
+  @@index([manufacturingComponentId, validFrom, validTo])
+  @@map("manufacturing_component_costs")
+}
+
+// ============================================================================
+// 3.7 FINANCIAL
+// ============================================================================
+
+/// Time-series: exchange rates entered manually or via a sync job.
+model ExchangeRate {
+  id            String
+  baseCurrency  Currency
+  quoteCurrency Currency
+  rate          Decimal   @db.Decimal(16, 6)
+  source        String?
+  validFrom     DateTime
+  validTo       DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([baseCurrency, quoteCurrency, validFrom, validTo])
+  @@map("exchange_rates")
+}
+
+// ============================================================================
+// 3.8 SCENARIO & CALCULATION ENGINE (what-if layer)
+// ============================================================================
+
+/// A "what-if" scenario: pins specific supplier quote, shipping route,
+/// customs regime, business entity status, and order quantity.
+/// Reproducible after the fact because all inputs are frozen via FK
+/// references to specific time-series rows.
+model Scenario {
+  id                      String          @id @default(cuid())
+  name                    String
+  description             String?
+  productId               String
+  productSpecVersionId    String
+  orderQuantityUnits      Int             // raw-material units to order
+  supplierId              String
+  supplierQuoteId         String
+  shippingRouteId         String
+  customsRegimeId         String
+  businessEntityStatusId  String
+  targetMarginPercent     Decimal?        @db.Decimal(5, 2)
+  isArchived              Boolean         @default(false)
+  createdById             String
+  createdAt               DateTime        @default(now())
+
+  product               Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productSpecVersion    ProductSpecVersion    @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  supplier              Supplier              @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  supplierQuote         SupplierQuote         @relation(fields: [supplierQuoteId], references: [id], onDelete: Restrict)
+  shippingRoute         ShippingRoute         @relation(fields: [shippingRouteId], references: [id], onDelete: Restrict)
+  customsRegime         CustomsRegime         @relation(fields: [customsRegimeId], references: [id], onDelete: Restrict)
+  businessEntityStatus  BusinessEntityStatus  @relation(fields: [businessEntityStatusId], references: [id], onDelete: Restrict)
+  createdBy             User                  @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  costCalculation  CostCalculation?
+  mfgCostCalcs     ManufacturingCostCalculation[]
+  profitCalcs      ProfitabilityCalculation[]
+  purchaseOrders   PurchaseOrder[]
+
+  @@index([productId])
+  @@index([supplierId])
+  @@index([createdAt])
+  @@map("scenarios")
+}
+
+/// One per Scenario — landed cost snapshot. All monetary values in the
+/// reporting currency. Pins exact input rows via parent Scenario FK.
+/// measurementUnit disambiguates what costPerMeasurementUnit refers to
+/// (M2, KG, PIECE, etc.) for this scenario's raw material.
+model CostCalculation {
+  id                       String           @id @default(cuid())
+  scenarioId               String           @unique
+  supplierCostTotal        Decimal          @db.Decimal(14, 2)
+  freightCostTotal         Decimal          @db.Decimal(14, 2)
+  insuranceCost            Decimal          @db.Decimal(14, 2)
+  tpiCost                  Decimal          @db.Decimal(14, 2)
+  importDutyCost           Decimal          @db.Decimal(14, 2)
+  vatCost                  Decimal          @db.Decimal(14, 2)
+  portClearanceCost        Decimal          @db.Decimal(14, 2)
+  totalLandedCostVatExcl   Decimal          @db.Decimal(14, 2)
+  totalLandedCostVatIncl   Decimal          @db.Decimal(14, 2)
+  costPerUnit              Decimal          @db.Decimal(14, 4)
+  costPerMeasurementUnit   Decimal          @db.Decimal(14, 4)
+  measurementUnit          MeasurementUnit
+  vatWorkingCapital        Decimal          @db.Decimal(14, 2)
+  reportingCurrency        Currency         @default(USD)
+  computedAt               DateTime         @default(now())
+
+  scenario                 Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+
+  @@map("cost_calculations")
+}
+
+/// One per Scenario × ProductSize — manufacturing cost breakdown.
+/// componentsCostBreakdown is JSON keyed by category name:
+/// {"Zipper": 1.25, "Thread": 0.08, "Label": 0.15, "Packaging": 0.30}
+model ManufacturingCostCalculation {
+  id                       String   @id @default(cuid())
+  scenarioId               String
+  productSizeId            String
+  rawMaterialCost          Decimal  @db.Decimal(14, 4)
+  laborCost                Decimal  @db.Decimal(14, 4)
+  componentsCostBreakdown  Json?
+  overheadCost             Decimal  @db.Decimal(14, 4)
+  totalManufacturingCost   Decimal  @db.Decimal(14, 4)
+  reportingCurrency        Currency @default(USD)
+  computedAt               DateTime @default(now())
+
+  scenario                 Scenario    @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+  productSize              ProductSize @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+
+  @@unique([scenarioId, productSizeId])
+  @@index([scenarioId])
+  @@map("manufacturing_cost_calculations")
+}
+
+/// One per Scenario × ProductSize × margin tested.
+model ProfitabilityCalculation {
+  id                         String   @id @default(cuid())
+  scenarioId                 String
+  productSizeId              String
+  marginPercent              Decimal  @db.Decimal(5, 2)
+  wholesalePrice             Decimal  @db.Decimal(14, 4)
+  retailPrice                Decimal  @db.Decimal(14, 4)
+  grossProfitWholesale       Decimal  @db.Decimal(14, 4)
+  grossProfitRetail          Decimal  @db.Decimal(14, 4)
+  estimatedNetProfitAfterOpex Decimal @db.Decimal(14, 4)
+  reportingCurrency          Currency @default(USD)
+  computedAt                 DateTime @default(now())
+
+  scenario                 Scenario    @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+  productSize              ProductSize @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+
+  @@index([scenarioId])
+  @@index([scenarioId, productSizeId])
+  @@map("profitability_calculations")
+}
+
+// ============================================================================
+// 3.9 OPERATIONS — PURCHASE ORDERS & SHIPMENTS
+// ============================================================================
+
+/// Actual purchase orders placed with suppliers.
+/// packagingUnit is denormalized from the SupplierQuote in effect at
+/// order time, for clarity when reading the PO later without joining
+/// back through Scenario → SupplierQuote.
+model PurchaseOrder {
+  id                   String        @id @default(cuid())
+  poNumber             String        @unique
+  supplierId           String
+  productSpecVersionId String
+  productId            String
+  scenarioId           String?
+  quantityUnits        Int
+  packagingUnit        PackagingUnit
+  unitPriceAgreed      Decimal       @db.Decimal(14, 4)
+  currency             Currency
+  totalValue           Decimal       @db.Decimal(14, 2)
+  orderDate            DateTime
+  expectedShipDate     DateTime?
+  status               POStatus      @default(DRAFT)
+  notes                String?
+  createdById          String
+  createdAt            DateTime      @default(now())
+
+  supplier           Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  productSpecVersion  ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  product            Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  scenario           Scenario?         @relation(fields: [scenarioId], references: [id], onDelete: SetNull)
+  createdBy          User              @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  shipment           Shipment?
+  inventoryLots      InventoryLot[]
+
+  @@index([supplierId])
+  @@index([status])
+  @@index([orderDate])
+  @@map("purchase_orders")
+}
+
+/// Tracks a shipment from departure to warehouse delivery.
+/// originPort/destinationPort/method are denormalized here for operational
+/// convenience (the actual route used, which may differ from the estimate).
+model Shipment {
+  id                    String          @id @default(cuid())
+  purchaseOrderId       String          @unique
+  transitaireId         String?
+  shippingRouteId       String
+  originPort            String
+  destinationPort       String
+  method                ShippingMethod
+  containerNumbers      String[]
+  billOfLadingNumber    String?
+  departureDate         DateTime?
+  estimatedArrivalDate  DateTime?
+  actualArrivalDate     DateTime?
+  status                ShipmentStatus  @default(BOOKED)
+  notes                 String?
+
+  purchaseOrder         PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  transitaire           Transitaire?    @relation(fields: [transitaireId], references: [id], onDelete: SetNull)
+  shippingRoute         ShippingRoute   @relation(fields: [shippingRouteId], references: [id], onDelete: Restrict)
+  customsDeclaration    CustomsDeclaration?
+
+  @@index([status])
+  @@index([estimatedArrivalDate])
+  @@map("shipments")
+}
+
+/// Records actual customs clearance for a shipment.
+model CustomsDeclaration {
+  id                 String    @id @default(cuid())
+  shipmentId         String    @unique
+  hsCodeDeclared     String
+  cifValueDeclared   Decimal   @db.Decimal(14, 2)
+  dutyPaid           Decimal   @db.Decimal(14, 2)
+  vatPaid            Decimal   @db.Decimal(14, 2)
+  tpiPaid            Decimal   @db.Decimal(14, 2)
+  ticPaid            Decimal?  @db.Decimal(14, 2)
+  clearanceDate      DateTime?
+  brokerName         String?
+  brokerFee          Decimal?  @db.Decimal(10, 2)
+  inspectionRequired Boolean   @default(false)
+  inspectionCost     Decimal?  @db.Decimal(10, 2)
+  notes              String?
+
+  shipment           Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+
+  @@map("customs_declarations")
+}
+
+/// Raw-material inventory received from a specific PO.
+/// Tracks how many units remain (decremented as production consumes them).
+/// packagingUnit is denormalized from the PO for standalone readability.
+model InventoryLot {
+  id                    String         @id @default(cuid())
+  purchaseOrderId       String
+  productSpecVersionId  String
+  productId             String
+  unitsReceived         Int
+  unitsRemaining        Int
+  packagingUnit         PackagingUnit
+  warehouseLocation     String?
+  receivedDate          DateTime       @default(now())
+
+  purchaseOrder         PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  productSpecVersion    ProductSpecVersion @relation(fields: [productSpecVersionId], references: [id], onDelete: Restrict)
+  productionBatches     ProductionBatch[]
+
+  @@index([purchaseOrderId])
+  @@index([warehouseLocation])
+  @@map("inventory_lots")
+}
+
+/// A production run: converting raw materials into finished goods.
+/// wastageQuantity + wastageUnit record the actual waste for this batch.
+/// wastageUnit should match ProductSize.rawMaterialUnit at production time
+/// but is stored explicitly since product specs can change over time and
+/// this is a historical record.
+model ProductionBatch {
+  id              String                @id @default(cuid())
+  productId       String
+  productSizeId   String
+  inventoryLotId  String
+  unitsProduced   Int                   @default(0)
+  wastageQuantity Decimal               @db.Decimal(10, 2) @default(0)
+  wastageUnit     MeasurementUnit
+  startDate       DateTime?
+  endDate         DateTime?
+  status          ProductionBatchStatus @default(PLANNED)
+  product         Product               @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productSize     ProductSize           @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+  inventoryLot    InventoryLot          @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict)
+
+  @@index([productId])
+  @@index([status])
+  @@map("production_batches")
+}
+
+/// Current stock of finished goods, per product + size + warehouse.
+model FinishedGoodsInventory {
+  id                String    @id @default(cuid())
+  productId         String
+  productSizeId     String
+  quantityOnHand    Int       @default(0)
+  warehouseLocation String    @default("")
+  lastUpdated       DateTime  @default(now())
+
+  product           Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productSize       ProductSize @relation(fields: [productSizeId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, productSizeId, warehouseLocation])
+  @@map("finished_goods_inventory")
+}
