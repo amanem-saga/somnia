@@ -1,0 +1,49 @@
+Origin Port,Destination Port,Shipping Method,Freight Cost,Transit Time,Insurance Estimate,Documentation Costs,Freight Forwarding Fees,Origin Port Handling,Destination Port Handling,Import Assumptions,Notes
+Shenzhen,Casablanca,FCL 20ft,"$2,995",28-32 days,$1 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,546 total estimate"
+Shenzhen,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Shenzhen,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Shenzhen,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Shenzhen,Tangier Med,FCL 20ft,"$2,850",25-30 days,$1 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,381 total estimate"
+Shenzhen,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Shenzhen,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Shenzhen,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Guangzhou,Casablanca,FCL 20ft,"$2,995",28-32 days,$1 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,546 total estimate"
+Guangzhou,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Guangzhou,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Guangzhou,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Guangzhou,Tangier Med,FCL 20ft,"$2,850",25-30 days,$1 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,381 total estimate"
+Guangzhou,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Guangzhou,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Guangzhou,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Shanghai,Casablanca,FCL 20ft,"$3,095",28-32 days,$2 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,647 total estimate"
+Shanghai,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Shanghai,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Shanghai,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Shanghai,Tangier Med,FCL 20ft,"$2,950",25-30 days,$1 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,481 total estimate"
+Shanghai,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Shanghai,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Shanghai,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Ningbo,Casablanca,FCL 20ft,"$3,095",28-32 days,$2 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,647 total estimate"
+Ningbo,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Ningbo,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Ningbo,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Ningbo,Tangier Med,FCL 20ft,"$2,950",25-30 days,$1 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,481 total estimate"
+Ningbo,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Ningbo,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Ningbo,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Qingdao,Casablanca,FCL 20ft,"$3,195",28-32 days,$2 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,747 total estimate"
+Qingdao,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Qingdao,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Qingdao,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Qingdao,Tangier Med,FCL 20ft,"$3,050",25-30 days,$2 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,582 total estimate"
+Qingdao,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Qingdao,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Qingdao,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Xiamen,Casablanca,FCL 20ft,"$3,195",28-32 days,$2 (0.5%),$80,$150,$120,$200,~33 CBM capacity. Suitable for 500+ rolls.,"$3,747 total estimate"
+Xiamen,Casablanca,LCL per CBM,$80-$120,30-38 days,$0 (est.),$80,$150,$120,$200,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Xiamen,Casablanca,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Xiamen,Casablanca,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
+Xiamen,Tangier Med,FCL 20ft,"$3,050",25-30 days,$2 (0.5%),$80,$150,$120,$180,~33 CBM capacity. Suitable for 500+ rolls.,"$3,582 total estimate"
+Xiamen,Tangier Med,LCL per CBM,$80-$120,28-35 days,$0 (est.),$80,$150,$120,$180,1 roll ~0.15 CBM. LCL economical for 10-200 rolls.,Total varies by volume. Min $500.
+Xiamen,Tangier Med,Air Freight per kg,$5.0-$7.0,5-8 days,Included,$110,$200,$50,$80,1 roll ~15 kg. Air viable for samples/urgent.,~$80-110/roll air freight.
+Xiamen,Tangier Med,Courier (DHL/FedEx) sample,$10.0/kg,3-6 days,Included,$30,$0,$0,$0,Max 5kg sample parcel. Door to door.,~$50 per 5kg sample package.
